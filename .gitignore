@@ -1,0 +1,22 @@
+# Survey data files — bring your own
+*.xlsx
+*.xls
+~$*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.egg-info/
+dist/
+build/
+
+# Conda / venv
+env/
+venv/
+.conda/
+
+# OS
+.DS_Store
+Thumbs.db
