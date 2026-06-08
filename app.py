@@ -137,8 +137,7 @@ CONTROLS_CARD = dbc.Card([
                 ]),
                 dbc.Tooltip(
                     "Color each pile by the selected metric. "
-                    "Beams are always colored by floor differential "
-                    "(blue → yellow = 0–2 in, red = ≥ 2 in).",
+                    "Beam differential coloring: green < 1 in, yellow 1–2 in, red ≥ 2 in.",
                     target="pile-color-tip", placement="bottom",
                 ),
                 dbc.RadioItems(
@@ -149,6 +148,17 @@ CONTROLS_CARD = dbc.Card([
                         {"label": "Settlement Rate",       "value": "rate"},
                     ],
                     value="settlement",
+                    inline=False,
+                    className="small mt-1",
+                ),
+                html.Label("Beam Color", className="text-muted small mt-2"),
+                dbc.RadioItems(
+                    id="beam-color-mode",
+                    options=[
+                        {"label": "Differential", "value": "differential"},
+                        {"label": "Gray",         "value": "gray"},
+                    ],
+                    value="differential",
                     inline=False,
                     className="small mt-1",
                 ),
@@ -581,6 +591,7 @@ app.clientside_callback(
     Input("color-range-max", "value"),
     Input("plane-toggles", "value"),
     Input("datum-elevation", "value"),
+    Input("beam-color-mode", "value"),
     prevent_initial_call=True,
 )
 

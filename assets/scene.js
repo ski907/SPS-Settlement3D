@@ -51,18 +51,12 @@
         return c;
     }
 
-    // Beam color: fixed 2-inch threshold — blue→yellow below, red at or above
+    // Beam color: three-band threshold — green < 1 in, yellow 1–2 in, red ≥ 2 in.
+    // Colors use zero blue component so the blue-tinted ambient light can't shift their hue.
     function beamDiffToColor(diffIn) {
-        if (diffIn >= 2.0) return new THREE.Color(0xe53935);
-        const t = Math.min(1.0, diffIn / 2.0);
-        const c = new THREE.Color();
-        if (t < 0.5) {
-            c.setRGB(0.0, 0.5 + t, 1.0 - t * 1.6);
-        } else {
-            const s = (t - 0.5) * 2.0;
-            c.setRGB(0.9 * s, 0.9, 0.1 * (1.0 - s));
-        }
-        return c;
+        if (diffIn >= 2.0) return new THREE.Color(0xff2200); // red-orange,  B=0
+        if (diffIn >= 1.0) return new THREE.Color(0xffcc00); // amber-yellow, B=0
+        return new THREE.Color(0x00cc00);                    // pure green,   B=0
     }
 
     // -----------------------------------------------------------------------
@@ -154,16 +148,23 @@
 
     function makeFloorBeamMesh() {
         const geo = new THREE.BoxGeometry(1, 2, 1.5);
-        const mat = new THREE.MeshPhongMaterial({ color: new THREE.Color(0x888888), shininess: 20 });
+        const mat = new THREE.MeshPhongMaterial({
+            color: new THREE.Color(0x888888),
+            shininess: 20,
+            specular: new THREE.Color(0x111111),
+        });
         const mesh = new THREE.Mesh(geo, mat);
         mesh.castShadow = true;
         return mesh;
     }
 
     function makeGradeBeamMesh() {
-        // Slightly smaller cross-section to visually distinguish from floor beams
         const geo = new THREE.BoxGeometry(1, 1.5, 1);
-        const mat = new THREE.MeshPhongMaterial({ color: new THREE.Color(0x7b6f5a), shininess: 15 });
+        const mat = new THREE.MeshPhongMaterial({
+            color: new THREE.Color(0x7b6f5a),
+            shininess: 15,
+            specular: new THREE.Color(0x111111),
+        });
         const mesh = new THREE.Mesh(geo, mat);
         mesh.castShadow = true;
         return mesh;
@@ -403,7 +404,7 @@
     // Scene update — called on each Dash callback
     // -----------------------------------------------------------------------
 
-    function updateScene(data, dateIdx, metric, exaggeration, viewMode, colorMin, colorMax, planeModes, datumParam) {
+    function updateScene(data, dateIdx, metric, exaggeration, viewMode, colorMin, colorMax, planeModes, datumParam, beamColorMode) {
         if (!data) return window._spsSelectedMP || null;
 
         // Lazy init
@@ -568,8 +569,15 @@
                 zE = (eCol.grade_beam_elevations[selectedDate] != null ? (eCol.grade_beam_elevations[selectedDate] - datumGB) * exag : 0) + VISUAL_COL_HEIGHT;
             }
 
-            if (!beam.is_inter_pod)
-                mesh.material.color.copy(beamDiffToColor(beam.floor_diffs[selectedDate] ?? 0));
+            if (!beam.is_inter_pod) {
+                if (beamColorMode === "gray") {
+                    mesh.material.color.setHex(0x607080);
+                } else {
+                    const diff = beam.floor_diffs[selectedDate] ?? 0;
+                    mesh.material.color.copy(beamDiffToColor(diff));
+                    mesh.material.emissive.setHex(diff >= 2.0 ? 0x330000 : 0x000000);
+                }
+            }
 
             placeBeam(mesh, beam.start_x, beam.start_y, zS, beam.end_x, beam.end_y, zE);
         });
@@ -612,8 +620,15 @@
                 zGE = eCol.grade_beam_elevations[selectedDate] != null ? (eCol.grade_beam_elevations[selectedDate] - datumGB) * exag : 0;
             }
 
-            if (!beam.is_inter_pod)
-                mesh.material.color.copy(beamDiffToColor((beam.grade_beam_diffs || {})[selectedDate] ?? 0));
+            if (!beam.is_inter_pod) {
+                if (beamColorMode === "gray") {
+                    mesh.material.color.setHex(0x607080);
+                } else {
+                    const diff = (beam.grade_beam_diffs || {})[selectedDate] ?? 0;
+                    mesh.material.color.copy(beamDiffToColor(diff));
+                    mesh.material.emissive.setHex(diff >= 2.0 ? 0x330000 : 0x000000);
+                }
+            }
 
             placeBeam(mesh, beam.start_x, beam.start_y, zGS, beam.end_x, beam.end_y, zGE);
         });
