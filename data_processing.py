@@ -53,32 +53,84 @@ def read_excel_sheet(xl_file, sheet):
     return data
 
 
-def _settlement_forecast(settlement_ft, nsurvey, nyears):
-    s = settlement_ft.drop("2022-01-07", errors="ignore")
-    s_window = s.iloc[-nsurvey:]
-    current_year = pd.to_datetime(s_window.index[-1]).year
+def _rate_regression_window(settlement_in, skip_dates, window_years=3):
+    """Per-MP, per-date rate (in/yr) via regression slope over a trailing window."""
+    s = settlement_in.drop(columns=skip_dates, errors="ignore")
+    dates = pd.to_datetime(s.columns)
+    window_days = window_years * 365.25
 
+    rate_df = pd.DataFrame(np.nan, index=s.index, columns=s.columns, dtype=float)
+
+    for date_str, date_dt in zip(s.columns, dates):
+        cutoff = date_dt - pd.Timedelta(days=window_days)
+        mask = (dates >= cutoff) & (dates <= date_dt)
+        window_cols = s.columns[mask]
+
+        if len(window_cols) < 2:
+            continue  # leave as NaN
+
+        ords = pd.to_datetime(window_cols).map(dt.datetime.toordinal).values.astype(float)
+
+        for mp in s.index:
+            vals = s.loc[mp, window_cols].values.astype(float)
+            ok = ~np.isnan(vals)
+            if ok.sum() < 2:
+                continue
+            slope, *_ = stats.linregress(ords[ok], vals[ok])
+            rate_df.loc[mp, date_str] = slope * 365.25  # in/yr
+
+    return rate_df
+
+
+def _settlement_forecast(settlement_ft, forecast_years, nyears):
+    """
+    Fit a per-MP linear regression over the trailing `forecast_years` of survey data,
+    then project forward `nyears` annual steps.
+
+    Returns
+    -------
+    proj : DataFrame  — future projected values  (index = proj date strings, cols = MPs)
+    reg_line : DataFrame — regression line from window start through last proj date
+                           (index = window survey dates + proj date strings, cols = MPs)
+    window_start : str — first survey date used in the regression
+    """
+    s = settlement_ft.drop("2022-01-07", errors="ignore")
+
+    end_dt = pd.to_datetime(s.index[-1])
+    cutoff_dt = end_dt - pd.Timedelta(days=forecast_years * 365.25)
+    s_window = s.loc[pd.to_datetime(s.index) >= cutoff_dt]
+    if len(s_window) < 2:
+        s_window = s.iloc[-2:]  # fallback: need at least 2 points
+
+    window_start = s_window.index[0]
+    current_year = pd.to_datetime(s_window.index[-1]).year
     proj_dates = [pd.to_datetime(f"{current_year + i + 1}-01-01") for i in range(nyears)]
 
-    s_ord = s_window.copy()
-    s_ord.index = pd.to_datetime(s_ord.index).map(dt.datetime.toordinal)
-    proj_ord = [dt.datetime.toordinal(d) for d in proj_dates]
-    delta_days = [o - s_ord.index[-1] for o in proj_ord]
-    starting = s_window.iloc[-1]
+    win_ords  = pd.to_datetime(s_window.index).map(dt.datetime.toordinal).values.astype(float)
+    proj_ords = np.array([dt.datetime.toordinal(d) for d in proj_dates], dtype=float)
 
-    reg = s_ord.apply(lambda x: stats.linregress(s_ord.index, x), result_type="expand").rename(
-        index={0: "slope", 1: "intercept", 2: "r", 3: "p", 4: "se"})
+    # Combined date list for the regression line: window surveys + proj dates
+    reg_dates_dt  = list(pd.to_datetime(s_window.index)) + proj_dates
+    reg_ords      = np.array([dt.datetime.toordinal(d) for d in reg_dates_dt], dtype=float)
+    reg_dates_str = [d.strftime("%Y-%m-%d") for d in reg_dates_dt]
 
-    proj = pd.DataFrame(index=proj_dates, columns=s_window.columns, dtype=float)
-    for col in reg.columns:
-        slope = reg.loc["slope", col]
-        proj[col] = [starting[col] + slope * d for d in delta_days]
+    proj     = pd.DataFrame(index=[d.strftime("%Y-%m-%d") for d in proj_dates],
+                            columns=s_window.columns, dtype=float)
+    reg_line = pd.DataFrame(index=reg_dates_str, columns=s_window.columns, dtype=float)
 
-    proj.index = proj.index.strftime("%Y-%m-%d")
-    return proj.round(4)
+    for col in s_window.columns:
+        vals = s_window[col].values.astype(float)
+        ok   = ~np.isnan(vals)
+        if ok.sum() < 2:
+            continue
+        slope, intercept, *_ = stats.linregress(win_ords[ok], vals[ok])
+        proj[col]     = slope * proj_ords + intercept
+        reg_line[col] = slope * reg_ords  + intercept
+
+    return proj.round(4), reg_line.round(4), window_start
 
 
-def process_all(survey, truss, shim, mp_locations, beams, nsurvey=6, nyears=5):
+def process_all(survey, truss, shim, mp_locations, beams, forecast_years=3, nyears=5):
     """
     Core processing pipeline. Returns a JSON-serialisable dict consumed by
     the Dash app and the Three.js scene.
@@ -116,21 +168,19 @@ def process_all(survey, truss, shim, mp_locations, beams, nsurvey=6, nyears=5):
     first = survey.apply(lambda row: row.dropna().iloc[0] if not row.dropna().empty else np.nan, axis=1)
     settlement_in = survey.rsub(first, axis=0).mul(12)   # rows=MPs, cols=dates
 
-    # Inter-survey settlement rate (in/yr) — exclude erroneous / duplicate surveys
+    # Settlement rate (in/yr) — 3-year trailing regression slope per MP per date
+    # Excludes erroneous / duplicate surveys before fitting
     _skip = ["2022-01-07", "2010-11-03"]  # 2010-11-03 is 1-day duplicate of 2010-11-02
-    s_no2022 = settlement_in.drop(columns=_skip, errors="ignore")
-    delta_in = s_no2022.diff(axis=1)
-    diff_days = pd.Series(
-        pd.to_datetime(s_no2022.columns).to_series().diff().dt.days.values,
-        index=s_no2022.columns,
-        dtype=float,
-    )
-    rate_in_yr = delta_in.div(diff_days, axis=1).mul(365)
+    rate_in_yr = _rate_regression_window(settlement_in, _skip, window_years=3)
 
     # Forecast (uses ft for regression, convert result back to inches)
     settlement_ft_T = settlement_in.div(12)   # MP x dates (ft)
-    proj_ft = _settlement_forecast(settlement_ft_T.T, nsurvey, nyears).T  # MP x proj_dates
-    proj_in = proj_ft.mul(12)
+    proj_ft, reg_line_ft, forecast_window_start = _settlement_forecast(
+        settlement_ft_T.T, forecast_years, nyears)
+    proj_ft      = proj_ft.T       # MP x proj_dates
+    reg_line_ft  = reg_line_ft.T   # MP x (window survey dates + proj dates)
+    proj_in      = proj_ft.mul(12)
+    reg_line_in  = reg_line_ft.mul(12)
 
     all_dates = survey.columns.tolist()
     proj_dates = proj_in.columns.tolist()
@@ -150,6 +200,7 @@ def process_all(survey, truss, shim, mp_locations, beams, nsurvey=6, nyears=5):
         gb_series = grade_beam_elev.loc[mp] if mp in grade_beam_elev.index else pd.Series(dtype=float)
         r_series  = rate_in_yr.loc[mp] if mp in rate_in_yr.index else pd.Series(dtype=float)
         p_series  = proj_in.loc[mp] if mp in proj_in.index else pd.Series(dtype=float)
+        fl_series = reg_line_in.loc[mp] if mp in reg_line_in.index else pd.Series(dtype=float)
         sh_series = shim.loc[mp] if mp in shim.index else pd.Series(dtype=float)
 
         columns_out.append({
@@ -162,6 +213,7 @@ def process_all(survey, truss, shim, mp_locations, beams, nsurvey=6, nyears=5):
             "grade_beam_elevations": _series_to_dict(gb_series),
             "settlement_rates": _series_to_dict(r_series),
             "proj_settlements": _series_to_dict(p_series),
+            "forecast_line": _series_to_dict(fl_series),
             "shim_inches": _series_to_dict(sh_series),
         })
 
@@ -219,14 +271,27 @@ def process_all(survey, truss, shim, mp_locations, beams, nsurvey=6, nyears=5):
     all_s = [v for col in columns_out for v in col["settlements"].values() if v is not None]
     all_r = [v for col in columns_out for v in col["settlement_rates"].values() if v is not None and not np.isnan(v)]
 
-    # Fixed datum: mean grade beam elevation at the earliest floor survey date
+    # Rate mean/std at the latest survey — used for ±1 STD default color range
+    latest_rate_date = rate_in_yr.columns[-1] if len(rate_in_yr.columns) else None
+    if latest_rate_date is not None:
+        latest_rates = [float(rate_in_yr.loc[m, latest_rate_date])
+                        for m in rate_in_yr.index
+                        if pd.notna(rate_in_yr.loc[m, latest_rate_date])]
+    else:
+        latest_rates = []
+    rate_mean = float(np.mean(latest_rates)) if latest_rates else 0.0
+    rate_std  = float(np.std(latest_rates))  if latest_rates else 0.0
+
+    # Fixed datum: 0.5 ft below the minimum grade beam elevation at the latest floor survey.
+    # Using the latest (most-settled) state ensures all columns sit above the reference
+    # plane regardless of how much they've settled since installation.
     datum_gb = 0.0
     if floor_dates:
-        earliest_floor = floor_dates[0]
-        gb_vals = [float(grade_beam_elev.loc[m, earliest_floor])
+        latest_floor = floor_dates[-1]
+        gb_vals = [float(grade_beam_elev.loc[m, latest_floor])
                    for m in mp_locations.index
-                   if m in grade_beam_elev.index and pd.notna(grade_beam_elev.loc[m, earliest_floor])]
-        datum_gb = round(float(np.mean(gb_vals)), 2) if gb_vals else 0.0
+                   if m in grade_beam_elev.index and pd.notna(grade_beam_elev.loc[m, latest_floor])]
+        datum_gb = round(float(min(gb_vals)) - 0.5, 2) if gb_vals else 0.0
 
     return {
         "columns": columns_out,
@@ -234,6 +299,7 @@ def process_all(survey, truss, shim, mp_locations, beams, nsurvey=6, nyears=5):
         "survey_dates": all_dates,
         "floor_dates": floor_dates,
         "proj_dates": proj_dates,
+        "forecast_window_start": forecast_window_start,
         "heatmap_grids": heatmap_grids,
         "heatmap_x": gx.tolist(),
         "heatmap_y": gy.tolist(),
@@ -241,6 +307,8 @@ def process_all(survey, truss, shim, mp_locations, beams, nsurvey=6, nyears=5):
             "max_settlement_in": float(max(all_s)) if all_s else 0.0,
             "min_settlement_in": float(min(all_s)) if all_s else 0.0,
             "max_rate_in_yr": float(max(all_r)) if all_r else 0.0,
+            "rate_mean": round(rate_mean, 4),
+            "rate_std":  round(rate_std,  4),
             "datum_grade_beam": datum_gb,
         },
     }

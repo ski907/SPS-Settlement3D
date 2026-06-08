@@ -137,15 +137,16 @@ CONTROLS_CARD = dbc.Card([
                 ]),
                 dbc.Tooltip(
                     "Color each pile by the selected metric. "
+                    "Settlement rate uses a 3-year trailing linear regression. "
                     "Beam differential coloring: green < 1 in, yellow 1–2 in, red ≥ 2 in.",
                     target="pile-color-tip", placement="bottom",
                 ),
                 dbc.RadioItems(
                     id="metric-dropdown",
                     options=[
-                        {"label": "None",                  "value": "none"},
-                        {"label": "Cumulative Settlement", "value": "settlement"},
-                        {"label": "Settlement Rate",       "value": "rate"},
+                        {"label": "None",                       "value": "none"},
+                        {"label": "Cumulative Settlement",      "value": "settlement"},
+                        {"label": "Settlement Rate (3-yr reg)", "value": "rate"},
                     ],
                     value="settlement",
                     inline=False,
@@ -226,8 +227,8 @@ app.layout = dbc.Container(fluid=True, children=[
     # ---- forecast options ----
     dbc.Row([
         dbc.Col([
-            html.Label("Surveys used for forecast:", className="text-muted small"),
-            dcc.Input(id="input-nsurvey", type="number", value=6, min=2, max=20,
+            html.Label("Years used for forecast:", className="text-muted small"),
+            dcc.Input(id="input-forecast-years", type="number", value=3, min=1, max=10,
                       style={"width": "70px", "marginLeft": "8px"},
                       className="bg-dark text-light border-secondary"),
         ], width=3),
@@ -333,11 +334,11 @@ def enable_compute(contents):
     Input("btn-compute", "n_clicks"),
     State("upload-xl", "contents"),
     State("upload-xl", "filename"),
-    State("input-nsurvey", "value"),
+    State("input-forecast-years", "value"),
     State("input-nyears", "value"),
     prevent_initial_call=True,
 )
-def compute_settlement(n_clicks, contents, filename, nsurvey, nyears):
+def compute_settlement(n_clicks, contents, filename, forecast_years, nyears):
     if not contents:
         raise PreventUpdate
 
@@ -354,7 +355,7 @@ def compute_settlement(n_clicks, contents, filename, nsurvey, nyears):
 
         mp_locations, beams = load_beam_info()
         data = process_all(survey, truss, shim, mp_locations, beams,
-                           nsurvey=int(nsurvey), nyears=int(nyears))
+                           forecast_years=int(forecast_years), nyears=int(nyears))
 
         n_surveys = len(data["survey_dates"])
         n_floor = len(data["floor_dates"])
@@ -410,7 +411,9 @@ def update_color_range(data, metric):
     if metric == "settlement":
         return 0, max(1, round(data["stats"]["max_settlement_in"] + 1))
     if metric == "rate":
-        return 0, max(0.1, round(data["stats"]["max_rate_in_yr"] + 0.5, 1))
+        mean = data["stats"]["rate_mean"]
+        std  = data["stats"]["rate_std"]
+        return round(mean - std, 3), round(mean + std, 3)
     return 0, 80
 
 
@@ -511,13 +514,11 @@ def update_sparkline(mp_id, data):
     obs_dates = [d for d, v in col["settlements"].items() if v is not None]
     obs_vals = [col["settlements"][d] for d in obs_dates]
 
-    proj_dates = [d for d, v in col["proj_settlements"].items() if v is not None]
-    proj_vals = [col["proj_settlements"][d] for d in proj_dates]
-
-    # Stitch observed + first projected point for continuity
-    if obs_dates and proj_dates:
-        proj_dates = [obs_dates[-1]] + proj_dates
-        proj_vals = [obs_vals[-1]] + proj_vals
+    # forecast_line spans regression window start → last projected date,
+    # overlapping the observed period so you can see the fit vs. actual data.
+    fl_items = [(d, v) for d, v in col.get("forecast_line", {}).items() if v is not None]
+    fl_dates = [it[0] for it in fl_items]
+    fl_vals  = [it[1] for it in fl_items]
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -527,11 +528,11 @@ def update_sparkline(mp_id, data):
         line=dict(color="#4fc3f7", width=2),
         marker=dict(size=5),
     ))
-    if proj_dates:
+    if fl_dates:
         fig.add_trace(go.Scatter(
-            x=proj_dates, y=proj_vals,
+            x=fl_dates, y=fl_vals,
             mode="lines",
-            name="Forecast",
+            name="Regression / Forecast",
             line=dict(color="#f0ad4e", width=2, dash="dash"),
         ))
 
