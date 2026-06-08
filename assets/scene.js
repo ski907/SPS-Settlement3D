@@ -28,6 +28,7 @@
         mouse: new THREE.Vector2(),
         clickHandlerBound: false,
         hoverHandlerBound: false,
+        beamLayers: ["floor", "grade"],
     };
 
     // -----------------------------------------------------------------------
@@ -406,7 +407,7 @@
     // Scene update — called on each Dash callback
     // -----------------------------------------------------------------------
 
-    function updateScene(data, dateIdx, metric, exaggeration, viewMode, colorMin, colorMax, planeModes, datumParam, beamColorMode) {
+    function updateScene(data, dateIdx, metric, exaggeration, viewMode, colorMin, colorMax, planeModes, datumParam, beamColorMode, beamLayers) {
         if (!data) return window._spsSelectedMP || null;
 
         // Lazy init
@@ -538,6 +539,7 @@
         }
 
         // ---- Floor-level beams (top of columns) ----
+        const showFloorBeams = APP.beamLayers.includes("floor");
         data.beams.forEach(beam => {
             if (beam.start_x == null || beam.end_x == null) return;
 
@@ -548,7 +550,7 @@
             }
             const mesh = APP.beamMeshes[beam.id];
 
-            if (!visibleColIds.has(beam.start_id) || !visibleColIds.has(beam.end_id)) {
+            if (!showFloorBeams || !visibleColIds.has(beam.start_id) || !visibleColIds.has(beam.end_id)) {
                 mesh.visible = false; return;
             }
             mesh.visible = true;
@@ -586,7 +588,7 @@
         });
 
         // ---- Grade-level beams (bottom of columns) ----
-        const showGradeBeams = true;
+        const showGradeBeams = APP.beamLayers.includes("grade");
 
         data.beams.forEach(beam => {
             if (beam.start_x == null || beam.end_x == null) return;
@@ -713,6 +715,21 @@
     }
 
     // -----------------------------------------------------------------------
+    // Beam layer toggle — separate callback so visibility changes are instant
+    // and independent of the full updateScene render cycle.
+    // -----------------------------------------------------------------------
+
+    function setBeamLayers(beamLayers) {
+        APP.beamLayers = Array.isArray(beamLayers) ? beamLayers : ["floor", "grade"];
+        if (!APP.initialized) return null;
+        const showFloor = APP.beamLayers.includes("floor");
+        const showGrade = APP.beamLayers.includes("grade");
+        Object.values(APP.beamMeshes).forEach(function (m) { m.visible = showFloor; });
+        Object.values(APP.gradeBeamMeshes).forEach(function (m) { m.visible = showGrade; });
+        return null;
+    }
+
+    // -----------------------------------------------------------------------
     // Register as Dash clientside namespace
     // -----------------------------------------------------------------------
 
@@ -720,6 +737,7 @@
     window.dash_clientside.settlement3d = {
         updateScene: updateScene,
         getSelectedMP: getSelectedMP,
+        setBeamLayers: setBeamLayers,
     };
 
     // Auto-init on DOM ready (handles initial page load before any callback fires)

@@ -163,6 +163,17 @@ CONTROLS_CARD = dbc.Card([
                     inline=False,
                     className="small mt-1",
                 ),
+                html.Label("Beam Layers", className="text-muted small mt-2"),
+                dbc.Checklist(
+                    id="beam-layer-toggles",
+                    options=[
+                        {"label": "Floor",  "value": "floor"},
+                        {"label": "Grade",  "value": "grade"},
+                    ],
+                    value=["floor", "grade"],
+                    inline=True,
+                    className="small mt-1",
+                ),
             ], width=3),
 
             # Color scale range (user-editable, auto-set from data)
@@ -594,6 +605,16 @@ app.clientside_callback(
     Input("plane-toggles", "value"),
     Input("datum-elevation", "value"),
     Input("beam-color-mode", "value"),
+    Input("beam-layer-toggles", "value"),
+    prevent_initial_call=True,
+)
+
+# Dedicated callback for beam layer toggle — updates APP.beamLayers and
+# directly sets mesh visibility without waiting for updateScene.
+app.clientside_callback(
+    ClientsideFunction(namespace="settlement3d", function_name="setBeamLayers"),
+    Output("three-dummy", "data"),
+    Input("beam-layer-toggles", "value"),
     prevent_initial_call=True,
 )
 
