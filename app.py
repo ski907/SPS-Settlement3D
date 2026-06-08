@@ -242,10 +242,11 @@ app.layout = dbc.Container(fluid=True, children=[
         ], width=6),
     ], className="mb-2"),
 
-    # ---- data stores ----
+    # ---- data stores & polling interval ----
     dcc.Store(id="scene-data"),
     dcc.Store(id="selected-mp", data=None),
     dcc.Store(id="three-dummy"),
+    dcc.Interval(id="click-poll", interval=400, n_intervals=0),
 
     # ---- controls ----
     CONTROLS_CARD,
@@ -595,11 +596,13 @@ app.clientside_callback(
     prevent_initial_call=True,
 )
 
-# Relay Three.js click events back to selected-mp store
+# Relay Three.js click events back to selected-mp store.
+# click-poll fires every 400ms so clicks register without needing a slider move.
 app.clientside_callback(
     ClientsideFunction(namespace="settlement3d", function_name="getSelectedMP"),
     Output("selected-mp", "data"),
     Input("three-canvas-trigger", "children"),
+    Input("click-poll", "n_intervals"),
     prevent_initial_call=True,
 )
 

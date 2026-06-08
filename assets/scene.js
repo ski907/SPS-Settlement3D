@@ -324,6 +324,7 @@
         if (hits.length > 0) {
             const hit = hits[0].object;
             APP.selectedMP = hit.userData.mp_id || null;
+            window._spsSelectedMP = APP.selectedMP;
             // Highlight selected
             Object.entries(APP.columnMeshes).forEach(([id, parts]) => {
                 if (parts.body) {
