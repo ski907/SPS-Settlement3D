@@ -54,9 +54,10 @@
     // Beam color: three-band threshold — green < 1 in, yellow 1–2 in, red ≥ 2 in.
     // Colors use zero blue component so the blue-tinted ambient light can't shift their hue.
     function beamDiffToColor(diffIn) {
-        if (diffIn >= 2.0) return new THREE.Color(0xff2200); // red-orange,  B=0
-        if (diffIn >= 1.0) return new THREE.Color(0xffcc00); // amber-yellow, B=0
-        return new THREE.Color(0x00cc00);                    // pure green,   B=0
+        if (diffIn >= 3.0) return new THREE.Color(0xff0044); // bright magenta-red, > 3 in
+        if (diffIn >= 2.0) return new THREE.Color(0xff2200); // red-orange,  2–3 in
+        if (diffIn >= 1.0) return new THREE.Color(0xffcc00); // amber-yellow, 1–2 in
+        return new THREE.Color(0x00cc00);                    // pure green,   < 1 in
     }
 
     // -----------------------------------------------------------------------
@@ -558,16 +559,17 @@
             const sS = sCol.settlements[selectedDate] ?? (isProj ? sCol.proj_settlements[selectedDate] : null) ?? 0;
             const eS = eCol.settlements[selectedDate] ?? (isProj ? eCol.proj_settlements[selectedDate] : null) ?? 0;
 
+            const gbS = sCol.grade_beam_elevations[selectedDate], gbEE = eCol.grade_beam_elevations[selectedDate];
             let zS, zE;
             if (viewMode === "bowl") {
                 zS = -((sS - minS) / 12) * exag + VISUAL_COL_HEIGHT;
                 zE = -((eS - minS) / 12) * exag + VISUAL_COL_HEIGHT;
             } else if (viewMode === "elevation") {
-                zS = (sCol.grade_beam_elevations[selectedDate] != null ? (sCol.grade_beam_elevations[selectedDate] - meanGB) * exag : 0) + VISUAL_COL_HEIGHT;
-                zE = (eCol.grade_beam_elevations[selectedDate] != null ? (eCol.grade_beam_elevations[selectedDate] - meanGB) * exag : 0) + VISUAL_COL_HEIGHT;
+                zS = (gbS != null ? (gbS - meanGB) * exag : 0) + VISUAL_COL_HEIGHT;
+                zE = (gbEE != null ? (gbEE - meanGB) * exag : 0) + VISUAL_COL_HEIGHT;
             } else { // fixed datum
-                zS = (sCol.grade_beam_elevations[selectedDate] != null ? (sCol.grade_beam_elevations[selectedDate] - datumGB) * exag : 0) + VISUAL_COL_HEIGHT;
-                zE = (eCol.grade_beam_elevations[selectedDate] != null ? (eCol.grade_beam_elevations[selectedDate] - datumGB) * exag : 0) + VISUAL_COL_HEIGHT;
+                zS = (gbS != null ? (gbS - datumGB) * exag : 0) + VISUAL_COL_HEIGHT;
+                zE = (gbEE != null ? (gbEE - datumGB) * exag : 0) + VISUAL_COL_HEIGHT;
             }
 
             if (!beam.is_inter_pod) {
@@ -576,15 +578,15 @@
                 } else {
                     const diff = beam.floor_diffs[selectedDate] ?? 0;
                     mesh.material.color.copy(beamDiffToColor(diff));
-                    mesh.material.emissive.setHex(diff >= 2.0 ? 0x330000 : 0x000000);
+                    mesh.material.emissive.setHex(diff >= 3.0 ? 0x660011 : diff >= 2.0 ? 0x330000 : 0x000000);
                 }
             }
 
             placeBeam(mesh, beam.start_x, beam.start_y, zS, beam.end_x, beam.end_y, zE);
         });
 
-        // ---- Grade-level beams (bottom of columns, post-Dec 2017 only) ----
-        const showGradeBeams = data.floor_dates.includes(selectedDate);
+        // ---- Grade-level beams (bottom of columns) ----
+        const showGradeBeams = true;
 
         data.beams.forEach(beam => {
             if (beam.start_x == null || beam.end_x == null) return;
@@ -609,16 +611,17 @@
             const sS = sCol.settlements[selectedDate] ?? (isProj ? sCol.proj_settlements[selectedDate] : null) ?? 0;
             const eS = eCol.settlements[selectedDate] ?? (isProj ? eCol.proj_settlements[selectedDate] : null) ?? 0;
 
+            const gbGS = sCol.grade_beam_elevations[selectedDate], gbGE = eCol.grade_beam_elevations[selectedDate];
             let zGS, zGE;
             if (viewMode === "bowl") {
                 zGS = -((sS - minS) / 12) * exag;
                 zGE = -((eS - minS) / 12) * exag;
             } else if (viewMode === "elevation") {
-                zGS = sCol.grade_beam_elevations[selectedDate] != null ? (sCol.grade_beam_elevations[selectedDate] - meanGB) * exag : 0;
-                zGE = eCol.grade_beam_elevations[selectedDate] != null ? (eCol.grade_beam_elevations[selectedDate] - meanGB) * exag : 0;
+                zGS = gbGS != null ? (gbGS - meanGB) * exag : 0;
+                zGE = gbGE != null ? (gbGE - meanGB) * exag : 0;
             } else { // fixed datum
-                zGS = sCol.grade_beam_elevations[selectedDate] != null ? (sCol.grade_beam_elevations[selectedDate] - datumGB) * exag : 0;
-                zGE = eCol.grade_beam_elevations[selectedDate] != null ? (eCol.grade_beam_elevations[selectedDate] - datumGB) * exag : 0;
+                zGS = gbGS != null ? (gbGS - datumGB) * exag : 0;
+                zGE = gbGE != null ? (gbGE - datumGB) * exag : 0;
             }
 
             if (!beam.is_inter_pod) {
@@ -627,7 +630,7 @@
                 } else {
                     const diff = (beam.grade_beam_diffs || {})[selectedDate] ?? 0;
                     mesh.material.color.copy(beamDiffToColor(diff));
-                    mesh.material.emissive.setHex(diff >= 2.0 ? 0x330000 : 0x000000);
+                    mesh.material.emissive.setHex(diff >= 3.0 ? 0x660011 : diff >= 2.0 ? 0x330000 : 0x000000);
                 }
             }
 

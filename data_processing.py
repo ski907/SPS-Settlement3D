@@ -140,26 +140,25 @@ def process_all(survey, truss, shim, mp_locations, beams, forecast_years=3, nyea
     # Floor elevation = survey lug + truss offset (confirmed from Dec 2017 onward)
     floor_elev = survey.add(truss).dropna(axis=1, how="all")
 
-    # Grade beam elevation:
-    #   For dates where both truss and shim data exist (Dec 2017+):
-    #     grade_beam = floor_elev - shim_pack - 12.31 ft constant
-    #     (12.31 ft = spreader beam height + column height above shim support to grade beam top)
-    #   For pre-2017 dates: use a fixed offset derived from the earliest available reference
-    #   so that relative Z positioning still tracks the survey lug correctly.
+    # Grade beam elevation = floor - shim - 12.31
+    #   (12.31 ft = spreader beam height + column height to grade beam top)
+    # For dates with direct truss+shim measurements, use those exactly.
+    # For all other dates (pre-truss surveys, latest surveys, projected dates),
+    # approximate with the last-known truss and shim values per MP.
     common_dates = truss.columns.intersection(shim_ft.columns)
-    ref_col = "2017-12-01" if "2017-12-01" in truss.columns else (
-        truss.columns[0] if len(truss.columns) > 0 else None)
 
-    if ref_col:
-        # Best-estimate offset for pre-reference dates (keeps relative positions consistent)
-        offset_ref = shim_ft[ref_col].add(12.31).sub(truss[ref_col])
-        grade_beam_elev = survey.sub(offset_ref, axis=0)
-        # Overwrite with accurate per-date values where truss+shim data exists
-        for d in common_dates:
-            if d in grade_beam_elev.columns and d in floor_elev.columns:
-                grade_beam_elev[d] = floor_elev[d].sub(shim_ft[d]).sub(12.31)
-    else:
-        grade_beam_elev = survey.copy()
+    # Per-MP most recent truss and shim values — used wherever a direct measurement
+    # is absent (non-floor survey dates, projected dates).  No shim changes assumed.
+    truss_last = truss.ffill(axis=1).iloc[:, -1]
+    shim_last  = shim_ft.ffill(axis=1).iloc[:, -1]
+
+    # Grade beam elevation = survey + truss - shim - 12.31
+    # Seed every survey date with last-known truss/shim, then overwrite with the
+    # accurate per-date formula wherever both measurements actually exist.
+    grade_beam_elev = survey.add(truss_last, axis=0).sub(shim_last, axis=0).sub(12.31)
+    for d in common_dates:
+        if d in grade_beam_elev.columns and d in floor_elev.columns:
+            grade_beam_elev[d] = floor_elev[d].sub(shim_ft[d]).sub(12.31)
     floor_dates = floor_elev.columns.tolist()
 
     # Cumulative settlement in inches (positive = settled down)
@@ -184,6 +183,23 @@ def process_all(survey, truss, shim, mp_locations, beams, forecast_years=3, nyea
 
     all_dates = survey.columns.tolist()
     proj_dates = proj_in.columns.tolist()
+
+    # Extend floor_elev to non-floor survey dates so beam diffs cover every date.
+    # grade_beam_elev already covers all survey dates from the seed above.
+    non_floor = [d for d in all_dates if d not in floor_dates]
+    if non_floor:
+        floor_elev = pd.concat(
+            [floor_elev, survey[non_floor].add(truss_last, axis=0)], axis=1
+        ).sort_index(axis=1)
+
+    # Extend both to projected dates using the projected survey lug elevation.
+    # proj_survey = first_lug - projected_settlement  →  floor = proj_survey + truss_last
+    if proj_dates:
+        proj_survey_ft = proj_ft.rsub(first, axis=0)
+        proj_floor_df  = proj_survey_ft.add(truss_last, axis=0)
+        proj_gb_df     = proj_floor_df.sub(shim_last, axis=0).sub(12.31)
+        floor_elev      = pd.concat([floor_elev, proj_floor_df], axis=1)
+        grade_beam_elev = pd.concat([grade_beam_elev, proj_gb_df], axis=1)
 
     # --- Build per-column records ---
     columns_out = []
