@@ -157,6 +157,7 @@ CONTROLS_CARD = dbc.Card([
                     id="beam-color-mode",
                     options=[
                         {"label": "Differential", "value": "differential"},
+                        {"label": "Elevation",    "value": "elevation"},
                         {"label": "Gray",         "value": "gray"},
                     ],
                     value="differential",

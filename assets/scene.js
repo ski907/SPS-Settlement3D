@@ -150,8 +150,10 @@
 
     function makeFloorBeamMesh() {
         const geo = new THREE.BoxGeometry(1, 2, 1.5);
+        const cnt = geo.attributes.position.count;
+        geo.setAttribute("color", new THREE.BufferAttribute(new Float32Array(cnt * 3).fill(0.53), 3));
         const mat = new THREE.MeshPhongMaterial({
-            color: new THREE.Color(0x888888),
+            vertexColors: true,
             shininess: 20,
             specular: new THREE.Color(0x111111),
         });
@@ -162,14 +164,33 @@
 
     function makeGradeBeamMesh() {
         const geo = new THREE.BoxGeometry(1, 1.5, 1);
+        const cnt = geo.attributes.position.count;
+        geo.setAttribute("color", new THREE.BufferAttribute(new Float32Array(cnt * 3).fill(0.45), 3));
         const mat = new THREE.MeshPhongMaterial({
-            color: new THREE.Color(0x7b6f5a),
+            vertexColors: true,
             shininess: 15,
             specular: new THREE.Color(0x111111),
         });
         const mesh = new THREE.Mesh(geo, mat);
         mesh.castShadow = true;
         return mesh;
+    }
+
+    // Write per-vertex gradient on a beam mesh (c0 at X=-0.5 end, c1 at X=+0.5 end).
+    // Pass identical colors for solid coloring. Skips meshes without a color buffer.
+    function applyBeamColors(mesh, c0, c1) {
+        const posAttr = mesh.geometry.attributes.position;
+        const colAttr = mesh.geometry.attributes.color;
+        if (!colAttr) return;
+        for (let i = 0; i < posAttr.count; i++) {
+            const t = posAttr.getX(i) + 0.5; // 0 at start end, 1 at far end
+            colAttr.setXYZ(i,
+                c0.r + (c1.r - c0.r) * t,
+                c0.g + (c1.g - c0.g) * t,
+                c0.b + (c1.b - c0.b) * t
+            );
+        }
+        colAttr.needsUpdate = true;
     }
 
     function makePlaneMesh(w, h, color, opacity) {
@@ -358,11 +379,14 @@
                 const s  = col.settlements[APP.selectedDate];
                 const r  = col.settlement_rates[APP.selectedDate];
                 const sh = col.shim_inches && col.shim_inches[APP.selectedDate];
-                const sText  = s  != null ? s.toFixed(2)  + " in"     : "—";
-                const rText  = r  != null ? r.toFixed(3)  + " in/yr"  : "—";
-                const shText = sh != null ? sh.toFixed(2) + " in"     : "—";
+                const fe = col.floor_elevations && col.floor_elevations[APP.selectedDate];
+                const sText  = s  != null ? s.toFixed(2)  + " in"    : "—";
+                const rText  = r  != null ? r.toFixed(3)  + " in/yr" : "—";
+                const shText = sh != null ? sh.toFixed(2) + " in"    : "—";
+                const feText = fe != null ? fe.toFixed(3) + " ft"    : "—";
                 tip.innerHTML = `<b>${col.id}</b> &nbsp;Pod ${col.pod}<br>` +
-                    `Settlement: ${sText}<br>Rate: ${rText}<br>Shim pack: ${shText}`;
+                    `Settlement: ${sText}<br>Rate: ${rText}<br>` +
+                    `Floor elev: ${feText}<br>Shim pack: ${shText}`;
                 tip.style.left = (event.clientX - rect.left + 14) + "px";
                 tip.style.top  = (event.clientY - rect.top  - 10) + "px";
                 tip.style.display = "block";
@@ -538,6 +562,24 @@
                 new THREE.Vector3(dx/len, dy/len, dz/len));
         }
 
+        // Elevation ranges for gradient coloring — computed once before beam loops
+        let floorElevMin = 0, floorElevMax = 1;
+        let gbElevMin = 0, gbElevMax = 1;
+        if (beamColorMode === "elevation") {
+            const feVals = data.columns.map(c => c.floor_elevations && c.floor_elevations[selectedDate]).filter(v => v != null);
+            const gbVals2 = data.columns.map(c => c.grade_beam_elevations[selectedDate]).filter(v => v != null);
+            if (feVals.length > 0) {
+                floorElevMin = Math.min(...feVals);
+                floorElevMax = Math.max(...feVals) || (floorElevMin + 0.1);
+                if (floorElevMax === floorElevMin) floorElevMax = floorElevMin + 0.1;
+            }
+            if (gbVals2.length > 0) {
+                gbElevMin = Math.min(...gbVals2);
+                gbElevMax = Math.max(...gbVals2) || (gbElevMin + 0.1);
+                if (gbElevMax === gbElevMin) gbElevMax = gbElevMin + 0.1;
+            }
+        }
+
         // ---- Floor-level beams (top of columns) ----
         const showFloorBeams = APP.beamLayers.includes("floor");
         data.beams.forEach(beam => {
@@ -575,13 +617,22 @@
             }
 
             if (!beam.is_inter_pod) {
-                if (beamColorMode === "gray") {
-                    mesh.material.color.setHex(0x607080);
+                let c0, c1;
+                if (beamColorMode === "elevation") {
+                    const fe0 = sCol.floor_elevations && sCol.floor_elevations[selectedDate];
+                    const fe1 = eCol.floor_elevations && eCol.floor_elevations[selectedDate];
+                    c0 = fe0 != null ? valueToColor(fe0, floorElevMin, floorElevMax) : new THREE.Color(0x607080);
+                    c1 = fe1 != null ? valueToColor(fe1, floorElevMin, floorElevMax) : new THREE.Color(0x607080);
+                    mesh.material.emissive.setHex(0x000000);
+                } else if (beamColorMode === "gray") {
+                    c0 = c1 = new THREE.Color(0x607080);
+                    mesh.material.emissive.setHex(0x000000);
                 } else {
                     const diff = beam.floor_diffs[selectedDate] ?? 0;
-                    mesh.material.color.copy(beamDiffToColor(diff));
+                    c0 = c1 = beamDiffToColor(diff);
                     mesh.material.emissive.setHex(diff >= 3.0 ? 0x660011 : diff >= 2.0 ? 0x330000 : 0x000000);
                 }
+                applyBeamColors(mesh, c0, c1);
             }
 
             placeBeam(mesh, beam.start_x, beam.start_y, zS, beam.end_x, beam.end_y, zE);
@@ -627,13 +678,20 @@
             }
 
             if (!beam.is_inter_pod) {
-                if (beamColorMode === "gray") {
-                    mesh.material.color.setHex(0x607080);
+                let gc0, gc1;
+                if (beamColorMode === "elevation") {
+                    gc0 = gbGS != null ? valueToColor(gbGS, gbElevMin, gbElevMax) : new THREE.Color(0x607080);
+                    gc1 = gbGE != null ? valueToColor(gbGE, gbElevMin, gbElevMax) : new THREE.Color(0x607080);
+                    mesh.material.emissive.setHex(0x000000);
+                } else if (beamColorMode === "gray") {
+                    gc0 = gc1 = new THREE.Color(0x607080);
+                    mesh.material.emissive.setHex(0x000000);
                 } else {
                     const diff = (beam.grade_beam_diffs || {})[selectedDate] ?? 0;
-                    mesh.material.color.copy(beamDiffToColor(diff));
+                    gc0 = gc1 = beamDiffToColor(diff);
                     mesh.material.emissive.setHex(diff >= 3.0 ? 0x660011 : diff >= 2.0 ? 0x330000 : 0x000000);
                 }
+                applyBeamColors(mesh, gc0, gc1);
             }
 
             placeBeam(mesh, beam.start_x, beam.start_y, zGS, beam.end_x, beam.end_y, zGE);
