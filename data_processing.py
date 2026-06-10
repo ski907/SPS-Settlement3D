@@ -27,7 +27,7 @@ def load_beam_info():
                     .set_index("MONITOR_POINT"))
 
     beams = df[["MP_W_S", "MP_E_N", "beamName", "beamLength",
-                "startX", "startY", "endX", "endY"]].dropna(subset=["beamName", "beamLength"])
+                "startX", "startY", "endX", "endY", "type"]].dropna(subset=["beamName", "beamLength"])
 
     return mp_locations, beams
 
@@ -261,6 +261,7 @@ def process_all(survey, truss, shim, mp_locations, beams, forecast_years=3, nyea
             "floor_diffs": _diff_series(floor_elev, sid, eid),
             "grade_beam_diffs": _diff_series(grade_beam_elev, sid, eid),
             "is_inter_pod": bool(frozenset([sid, eid]) in _INTER_POD),
+            "is_vlink": bool(pd.notna(row.get("type")) and row["type"] == "vlink"),
         })
 
     # --- Interpolated heatmap grids ---

@@ -169,9 +169,10 @@ CONTROLS_CARD = dbc.Card([
                     id="beam-layer-toggles",
                     options=[
                         {"label": "Floor",  "value": "floor"},
+                        {"label": "Virtual Link",  "value": "virtual link"},
                         {"label": "Grade",  "value": "grade"},
                     ],
-                    value=["floor", "grade"],
+                    value=["floor", "virtual link", "grade"],
                     inline=True,
                     className="small mt-1",
                 ),

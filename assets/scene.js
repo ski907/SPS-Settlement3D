@@ -14,6 +14,7 @@
         controls: null,
         columnMeshes: {},    // mp_id → { body: Mesh, cap: Mesh }
         beamMeshes: {},      // beam_id → floor-level beam Mesh
+        vlinkMeshes: {},    // vlink_id → floor-level vlink Mesh
         gradeBeamMeshes: {}, // beam_id+"_gb" → grade-level beam Mesh (post-2017 only)
         refPlane: null,
         planes: { mean: null, all: null, podA: null, podB: null },
@@ -28,7 +29,7 @@
         mouse: new THREE.Vector2(),
         clickHandlerBound: false,
         hoverHandlerBound: false,
-        beamLayers: ["floor", "grade"],
+        beamLayers: ["floor", "virtual link", "grade"],
     };
 
     // -----------------------------------------------------------------------
@@ -181,7 +182,7 @@
     function applyBeamColors(mesh, c0, c1) {
         const posAttr = mesh.geometry.attributes.position;
         const colAttr = mesh.geometry.attributes.color;
-        if (!colAttr) return;
+        if (!colAttr) { mesh.material.color.copy(c0); return; } // cylinder meshes: solid start color
         for (let i = 0; i < posAttr.count; i++) {
             const t = posAttr.getX(i) + 0.5; // 0 at start end, 1 at far end
             colAttr.setXYZ(i,
@@ -214,6 +215,20 @@
         const mesh = new THREE.Mesh(geo, mat);
         mesh.castShadow = true;
         return mesh;
+    }
+
+    function makeVlinkMesh() {
+        // Thin translucent tube for virtual links (topological connectors, not structural beams)
+        const geo = new THREE.CylinderGeometry(0.5, 0.5, 1, 8);
+        geo.applyMatrix4(_xRotMat); // height along X so scale.x stretches it
+        const mat = new THREE.MeshPhongMaterial({
+            color: new THREE.Color(0x7fb3d3),
+            transparent: true,
+            opacity: 0.4,
+            depthWrite: false,
+            shininess: 60,
+        });
+        return new THREE.Mesh(geo, mat);
     }
 
     // -----------------------------------------------------------------------
@@ -397,18 +412,20 @@
         // Raycast beams (floor + grade)
         const beamMeshList = [
             ...Object.values(APP.beamMeshes),
+            ...Object.values(APP.vlinkMeshes),
             ...Object.values(APP.gradeBeamMeshes),
         ].filter(m => m.visible);
         const beamHits = APP.raycaster.intersectObjects(beamMeshList);
         if (beamHits.length > 0) {
             const entry = APP.meshToBeam && APP.meshToBeam.get(beamHits[0].object);
             if (entry) {
-                const { beam, isGrade } = entry;
+                const { beam, isGrade, isVlink } = entry;
+                const vlinkTag = isVlink ? ' <span style="color:#7fb3d3;font-size:0.85em">(vlink)</span>' : '';
+                let html = `<b>${beam.id}</b>${vlinkTag}<br>${beam.start_id} ↔ ${beam.end_id}`;
                 const fd  = (beam.floor_diffs      || {})[APP.selectedDate];
                 const gbd = (beam.grade_beam_diffs  || {})[APP.selectedDate];
                 const diffLabel = isGrade ? "Grade beam diff" : "Floor diff";
                 const diffVal   = isGrade ? gbd : fd;
-                let html = `<b>${beam.id}</b><br>${beam.start_id} ↔ ${beam.end_id}`;
                 if (diffVal != null) html += `<br>${diffLabel}: ${diffVal.toFixed(2)} in`;
                 if (!isGrade && gbd != null) html += `<br>Grade beam diff: ${gbd.toFixed(2)} in`;
                 tip.innerHTML = html;
@@ -582,21 +599,28 @@
 
         // ---- Floor-level beams (top of columns) ----
         const showFloorBeams = APP.beamLayers.includes("floor");
+        const showVlinks     = APP.beamLayers.includes("virtual link");
         data.beams.forEach(beam => {
             if (beam.start_x == null || beam.end_x == null) return;
 
-            if (!APP.beamMeshes[beam.id]) {
-                const mesh = beam.is_inter_pod ? makeInterPodMesh() : makeFloorBeamMesh();
+            // Vlinks and beams are cached in separate dicts
+            const meshDict = beam.is_vlink ? APP.vlinkMeshes : APP.beamMeshes;
+            if (!meshDict[beam.id]) {
+                let mesh;
+                if (beam.is_vlink)          mesh = makeVlinkMesh();
+                else if (beam.is_inter_pod) mesh = makeInterPodMesh();
+                else                        mesh = makeFloorBeamMesh();
                 APP.scene.add(mesh);
-                APP.beamMeshes[beam.id] = mesh;
+                meshDict[beam.id] = mesh;
             }
-            const mesh = APP.beamMeshes[beam.id];
+            const mesh = meshDict[beam.id];
 
-            if (!showFloorBeams || !visibleColIds.has(beam.start_id) || !visibleColIds.has(beam.end_id)) {
+            const showThis = beam.is_vlink ? showVlinks : showFloorBeams;
+            if (!showThis || !visibleColIds.has(beam.start_id) || !visibleColIds.has(beam.end_id)) {
                 mesh.visible = false; return;
             }
             mesh.visible = true;
-            APP.meshToBeam.set(mesh, { beam, isGrade: false });
+            APP.meshToBeam.set(mesh, { beam, isGrade: false, isVlink: !!beam.is_vlink });
 
             const sCol = data.columns.find(c => c.id === beam.start_id);
             const eCol = data.columns.find(c => c.id === beam.end_id);
@@ -647,7 +671,7 @@
             const gbId = beam.id + "_gb";
 
             if (!APP.gradeBeamMeshes[gbId]) {
-                const mesh = beam.is_inter_pod ? makeInterPodMesh() : makeGradeBeamMesh();
+                const mesh = makeGradeBeamMesh();
                 APP.scene.add(mesh);
                 APP.gradeBeamMeshes[gbId] = mesh;
             }
@@ -657,7 +681,7 @@
                 mesh.visible = false; return;
             }
             mesh.visible = true;
-            APP.meshToBeam.set(mesh, { beam, isGrade: true });
+            APP.meshToBeam.set(mesh, { beam, isGrade: true, isVlink: !!beam.is_vlink });
 
             const sCol = data.columns.find(c => c.id === beam.start_id);
             const eCol = data.columns.find(c => c.id === beam.end_id);
@@ -778,11 +802,13 @@
     // -----------------------------------------------------------------------
 
     function setBeamLayers(beamLayers) {
-        APP.beamLayers = Array.isArray(beamLayers) ? beamLayers : ["floor", "grade"];
+        APP.beamLayers = Array.isArray(beamLayers) ? beamLayers : ["floor", "virtual link", "grade"];
         if (!APP.initialized) return null;
         const showFloor = APP.beamLayers.includes("floor");
+        const showVlink = APP.beamLayers.includes("virtual link");
         const showGrade = APP.beamLayers.includes("grade");
         Object.values(APP.beamMeshes).forEach(function (m) { m.visible = showFloor; });
+        Object.values(APP.vlinkMeshes).forEach(function (m) { m.visible = showVlink; });
         Object.values(APP.gradeBeamMeshes).forEach(function (m) { m.visible = showGrade; });
         return null;
     }
