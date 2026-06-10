@@ -314,13 +314,21 @@
         axes.position.set(-20, -20, 0);
         APP.scene.add(axes);
 
-        // Resize handler
-        window.addEventListener("resize", () => {
-            const w = container.clientWidth;
-            const h = container.clientHeight;
+        // Resize handler — use ResizeObserver so layout-driven size changes are caught
+        function onContainerResize(w, h) {
+            if (w <= 0 || h <= 0) return;
             APP.renderer.setSize(w, h);
             APP.camera.aspect = w / h;
             APP.camera.updateProjectionMatrix();
+        }
+        if (typeof ResizeObserver !== "undefined") {
+            new ResizeObserver(function (entries) {
+                const e = entries[0];
+                onContainerResize(e.contentRect.width, e.contentRect.height);
+            }).observe(container);
+        }
+        window.addEventListener("resize", function () {
+            onContainerResize(container.clientWidth, container.clientHeight);
         });
 
         // Click + hover handlers
@@ -804,12 +812,16 @@
     function setBeamLayers(beamLayers) {
         APP.beamLayers = Array.isArray(beamLayers) ? beamLayers : ["floor", "virtual link", "grade"];
         if (!APP.initialized) return null;
-        const showFloor = APP.beamLayers.includes("floor");
-        const showVlink = APP.beamLayers.includes("virtual link");
-        const showGrade = APP.beamLayers.includes("grade");
-        Object.values(APP.beamMeshes).forEach(function (m) { m.visible = showFloor; });
-        Object.values(APP.vlinkMeshes).forEach(function (m) { m.visible = showVlink; });
-        Object.values(APP.gradeBeamMeshes).forEach(function (m) { m.visible = showGrade; });
+        // Only force-hide when a layer is turned off.
+        // Re-showing is left to updateScene, which is the only place that correctly
+        // checks endpoint visibility and populates APP.meshToBeam.  A mesh made
+        // visible here without a meshToBeam entry would be hittable but show no tooltip.
+        if (!APP.beamLayers.includes("floor"))
+            Object.values(APP.beamMeshes).forEach(function (m) { m.visible = false; });
+        if (!APP.beamLayers.includes("virtual link"))
+            Object.values(APP.vlinkMeshes).forEach(function (m) { m.visible = false; });
+        if (!APP.beamLayers.includes("grade"))
+            Object.values(APP.gradeBeamMeshes).forEach(function (m) { m.visible = false; });
         return null;
     }
 

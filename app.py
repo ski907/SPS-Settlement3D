@@ -262,22 +262,8 @@ app.layout = dbc.Container(fluid=True, children=[
     dcc.Store(id="three-dummy"),
     dcc.Interval(id="click-poll", interval=400, n_intervals=0),
 
-    # ---- controls ----
-    CONTROLS_CARD,
-
-    # ---- main panels ----
+    # ---- 3D Foundation View (full width) ----
     dbc.Row([
-        # Plan heatmap
-        dbc.Col([
-            dbc.Card([
-                dbc.CardHeader("Plan View — Settlement Heatmap", className="py-1 small"),
-                dbc.CardBody([
-                    dcc.Graph(id="heatmap-chart", style={"height": "480px"},
-                              config={"displayModeBar": True, "scrollZoom": True}),
-                ], className="p-1"),
-            ], style={"background": "#1e2130", "border": "1px solid #2d3250"}),
-        ], width=5),
-        # Three.js 3D view
         dbc.Col([
             dbc.Card([
                 dbc.CardHeader(
@@ -293,7 +279,7 @@ app.layout = dbc.Container(fluid=True, children=[
                 dbc.CardBody([
                     html.Div(
                         id="three-canvas-container",
-                        style={"width": "100%", "height": "480px", "position": "relative",
+                        style={"width": "100%", "height": "600px", "position": "relative",
                                "background": "#0d1117"},
                         children=[
                             html.Div(
@@ -317,11 +303,27 @@ app.layout = dbc.Container(fluid=True, children=[
                     ),
                 ], className="p-0"),
             ], style={"background": "#1e2130", "border": "1px solid #2d3250"}),
-        ], width=7),
+        ], width=12),
     ], className="mb-2"),
 
-    # ---- sparkline ----
-    SPARKLINE_CARD,
+    # ---- controls ----
+    CONTROLS_CARD,
+
+    # ---- heatmap + sparkline ----
+    dbc.Row([
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader("Plan View — Settlement Heatmap", className="py-1 small"),
+                dbc.CardBody([
+                    dcc.Graph(id="heatmap-chart", style={"height": "480px"},
+                              config={"displayModeBar": True, "scrollZoom": True}),
+                ], className="p-1"),
+            ], style={"background": "#1e2130", "border": "1px solid #2d3250"}),
+        ], width=6),
+        dbc.Col([
+            SPARKLINE_CARD,
+        ], width=6),
+    ], className="mb-2"),
 
     # ---- hidden div needed for clientside output ----
     html.Div(id="three-canvas-trigger", style={"display": "none"}),
