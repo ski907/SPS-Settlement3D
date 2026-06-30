@@ -5,6 +5,8 @@ import numpy as np
 import scipy.stats as stats
 from scipy.interpolate import griddata
 
+from stress_calcs import compute_grade_beam_stress
+
 
 def find_beam_csv():
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -82,6 +84,53 @@ def _rate_regression_window(settlement_in, skip_dates, window_years=3):
     return rate_df
 
 
+def _normalized_settlement(settlement_in):
+    """
+    Lifetime-average settlement rate: settlement_in / age_of_column_years.
+
+    Uses each MP's first non-null survey as its installation baseline.
+    Returns NaN until the column has at least 6 months of data.
+    """
+    first_valid = settlement_in.apply(lambda row: row.first_valid_index(), axis=1)
+    dates_dt    = pd.to_datetime(settlement_in.columns)
+    norm        = pd.DataFrame(np.nan, index=settlement_in.index,
+                               columns=settlement_in.columns, dtype=float)
+    for mp in settlement_in.index:
+        fd_str = first_valid[mp]
+        if fd_str is None:
+            continue
+        first_dt = pd.to_datetime(fd_str)
+        for date_str, date_dt in zip(settlement_in.columns, dates_dt):
+            s = settlement_in.loc[mp, date_str]
+            if pd.isna(s):
+                continue
+            age_yr = (date_dt - first_dt).days / 365.25
+            if age_yr < 0.5:
+                continue
+            norm.loc[mp, date_str] = round(float(s) / age_yr, 4)
+    return norm
+
+
+def _per_date_stats(metric_df):
+    """
+    Population mean and std across all MPs for each date column.
+    Ignores NaN and infinite values.
+    Returns: {date_str: {"mean": float, "std": float}}
+    """
+    result = {}
+    for date_str in metric_df.columns:
+        vals = (metric_df[date_str]
+                .replace([np.inf, -np.inf], np.nan)
+                .dropna()
+                .values.astype(float))
+        if len(vals) >= 2:
+            result[date_str] = {
+                "mean": round(float(np.mean(vals)), 4),
+                "std":  round(float(np.std(vals)),  4),
+            }
+    return result
+
+
 def _settlement_forecast(settlement_ft, forecast_years, nyears):
     """
     Fit a per-MP linear regression over the trailing `forecast_years` of survey data,
@@ -140,8 +189,8 @@ def process_all(survey, truss, shim, mp_locations, beams, forecast_years=3, nyea
     # Floor elevation = survey lug + truss offset (confirmed from Dec 2017 onward)
     floor_elev = survey.add(truss).dropna(axis=1, how="all")
 
-    # Grade beam elevation = floor - shim - 12.31
-    #   (12.31 ft = spreader beam height + column height to grade beam top)
+    # Grade beam elevation = floor - shim - 11.04
+    #   (11.04 ft (11'-1/2") = spreader beam height (12") + column height to grade beam top to bottom of shim pack (10'-1/2"))
     # For dates with direct truss+shim measurements, use those exactly.
     # For all other dates (pre-truss surveys, latest surveys, projected dates),
     # approximate with the last-known truss and shim values per MP.
@@ -152,13 +201,13 @@ def process_all(survey, truss, shim, mp_locations, beams, forecast_years=3, nyea
     truss_last = truss.ffill(axis=1).iloc[:, -1]
     shim_last  = shim_ft.ffill(axis=1).iloc[:, -1]
 
-    # Grade beam elevation = survey + truss - shim - 12.31
+    # Grade beam elevation = survey + truss - shim - 11.04
     # Seed every survey date with last-known truss/shim, then overwrite with the
     # accurate per-date formula wherever both measurements actually exist.
-    grade_beam_elev = survey.add(truss_last, axis=0).sub(shim_last, axis=0).sub(12.31)
+    grade_beam_elev = survey.add(truss_last, axis=0).sub(shim_last, axis=0).sub(11.04)
     for d in common_dates:
         if d in grade_beam_elev.columns and d in floor_elev.columns:
-            grade_beam_elev[d] = floor_elev[d].sub(shim_ft[d]).sub(12.31)
+            grade_beam_elev[d] = floor_elev[d].sub(shim_ft[d]).sub(11.04)
     floor_dates = floor_elev.columns.tolist()
 
     # Cumulative settlement in inches (positive = settled down)
@@ -167,10 +216,17 @@ def process_all(survey, truss, shim, mp_locations, beams, forecast_years=3, nyea
     first = survey.apply(lambda row: row.dropna().iloc[0] if not row.dropna().empty else np.nan, axis=1)
     settlement_in = survey.rsub(first, axis=0).mul(12)   # rows=MPs, cols=dates
 
-    # Settlement rate (in/yr) — 3-year trailing regression slope per MP per date
-    # Excludes erroneous / duplicate surveys before fitting
-    _skip = ["2022-01-07", "2010-11-03"]  # 2010-11-03 is 1-day duplicate of 2010-11-02
+    # Settlement rates at multiple trailing windows (in/yr)
+    # 2022-01-07 is erroneous; 2010-11-03 is 1-day duplicate of 2010-11-02
+    _skip = ["2022-01-07", "2010-11-03"]
     rate_in_yr = _rate_regression_window(settlement_in, _skip, window_years=3)
+    rate_1yr   = _rate_regression_window(settlement_in, _skip, window_years=1)
+    rate_5yr   = _rate_regression_window(settlement_in, _skip, window_years=5)
+    rate_10yr  = _rate_regression_window(settlement_in, _skip, window_years=10)
+
+    # Normalized (lifetime-average) settlement rate per MP
+    norm_settle_in    = _normalized_settlement(settlement_in)
+    first_survey_date = settlement_in.apply(lambda row: row.first_valid_index(), axis=1)
 
     # Forecast (uses ft for regression, convert result back to inches)
     settlement_ft_T = settlement_in.div(12)   # MP x dates (ft)
@@ -197,9 +253,12 @@ def process_all(survey, truss, shim, mp_locations, beams, forecast_years=3, nyea
     if proj_dates:
         proj_survey_ft = proj_ft.rsub(first, axis=0)
         proj_floor_df  = proj_survey_ft.add(truss_last, axis=0)
-        proj_gb_df     = proj_floor_df.sub(shim_last, axis=0).sub(12.31)
+        proj_gb_df     = proj_floor_df.sub(shim_last, axis=0).sub(11.04)
         floor_elev      = pd.concat([floor_elev, proj_floor_df], axis=1)
         grade_beam_elev = pd.concat([grade_beam_elev, proj_gb_df], axis=1)
+
+    # --- Grade-beam stress (central-difference curvature) ---
+    gb_stress, col_curv = compute_grade_beam_stress(beams, grade_beam_elev, mp_locations)
 
     # --- Build per-column records ---
     columns_out = []
@@ -211,19 +270,26 @@ def process_all(survey, truss, shim, mp_locations, beams, forecast_years=3, nyea
             return {d: (float(v) if pd.notna(v) else None)
                     for d, v in series.items()}
 
-        s_series  = settlement_in.loc[mp] if mp in settlement_in.index else pd.Series(dtype=float)
-        fe_series = floor_elev.loc[mp] if mp in floor_elev.index else pd.Series(dtype=float)
-        gb_series = grade_beam_elev.loc[mp] if mp in grade_beam_elev.index else pd.Series(dtype=float)
-        r_series  = rate_in_yr.loc[mp] if mp in rate_in_yr.index else pd.Series(dtype=float)
-        p_series  = proj_in.loc[mp] if mp in proj_in.index else pd.Series(dtype=float)
-        fl_series = reg_line_in.loc[mp] if mp in reg_line_in.index else pd.Series(dtype=float)
-        sh_series = shim.loc[mp] if mp in shim.index else pd.Series(dtype=float)
+        s_series   = settlement_in.loc[mp]  if mp in settlement_in.index  else pd.Series(dtype=float)
+        fe_series  = floor_elev.loc[mp]     if mp in floor_elev.index     else pd.Series(dtype=float)
+        gb_series  = grade_beam_elev.loc[mp] if mp in grade_beam_elev.index else pd.Series(dtype=float)
+        r_series   = rate_in_yr.loc[mp]     if mp in rate_in_yr.index     else pd.Series(dtype=float)
+        p_series   = proj_in.loc[mp]        if mp in proj_in.index        else pd.Series(dtype=float)
+        fl_series  = reg_line_in.loc[mp]    if mp in reg_line_in.index    else pd.Series(dtype=float)
+        sh_series  = shim.loc[mp]           if mp in shim.index           else pd.Series(dtype=float)
+        ns_series  = norm_settle_in.loc[mp] if mp in norm_settle_in.index else pd.Series(dtype=float)
+        r1_series  = rate_1yr.loc[mp]       if mp in rate_1yr.index       else pd.Series(dtype=float)
+        r5_series  = rate_5yr.loc[mp]       if mp in rate_5yr.index       else pd.Series(dtype=float)
+        r10_series = rate_10yr.loc[mp]      if mp in rate_10yr.index      else pd.Series(dtype=float)
+
+        install_date = first_survey_date[mp] if mp in first_survey_date.index else None
 
         columns_out.append({
             "id": mp,
             "x": x,
             "y": y,
             "pod": mp[0],
+            "installation_date": str(install_date) if install_date is not None else None,
             "settlements": _series_to_dict(s_series),
             "floor_elevations": _series_to_dict(fe_series),
             "grade_beam_elevations": _series_to_dict(gb_series),
@@ -231,6 +297,11 @@ def process_all(survey, truss, shim, mp_locations, beams, forecast_years=3, nyea
             "proj_settlements": _series_to_dict(p_series),
             "forecast_line": _series_to_dict(fl_series),
             "shim_inches": _series_to_dict(sh_series),
+            "curvature_triplets": col_curv.get(mp, {}),
+            "normalized_settlement": _series_to_dict(ns_series),
+            "rate_1yr":  _series_to_dict(r1_series),
+            "rate_5yr":  _series_to_dict(r5_series),
+            "rate_10yr": _series_to_dict(r10_series),
         })
 
     # --- Build per-beam records ---
@@ -249,6 +320,11 @@ def process_all(survey, truss, shim, mp_locations, beams, forecast_years=3, nyea
                         for d in df.columns}
             return {}
 
+        stress_data = gb_stress.get(row["beamName"], {})
+        has_stress  = any(
+            isinstance(v, dict) and (v.get("s") is not None or v.get("e") is not None)
+            for v in stress_data.values()
+        )
         beams_out.append({
             "id": row["beamName"],
             "start_id": sid,
@@ -262,6 +338,8 @@ def process_all(survey, truss, shim, mp_locations, beams, forecast_years=3, nyea
             "grade_beam_diffs": _diff_series(grade_beam_elev, sid, eid),
             "is_inter_pod": bool(frozenset([sid, eid]) in _INTER_POD),
             "is_vlink": bool(pd.notna(row.get("type")) and row["type"] == "vlink"),
+            "is_grade": has_stress,
+            "grade_beam_stress": stress_data,
         })
 
     # --- Interpolated heatmap grids ---
@@ -327,5 +405,9 @@ def process_all(survey, truss, shim, mp_locations, beams, forecast_years=3, nyea
             "rate_mean": round(rate_mean, 4),
             "rate_std":  round(rate_std,  4),
             "datum_grade_beam": datum_gb,
+            "norm_settle_stats": _per_date_stats(norm_settle_in),
+            "rate_1yr_stats":    _per_date_stats(rate_1yr),
+            "rate_3yr_stats":    _per_date_stats(rate_in_yr),
+            "rate_5yr_stats":    _per_date_stats(rate_5yr),
         },
     }

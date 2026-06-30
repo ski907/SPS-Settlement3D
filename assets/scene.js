@@ -62,6 +62,22 @@
         return new THREE.Color(0x00cc00);                    // pure green,   < 1 in
     }
 
+    // Traffic-light color scale for bending stress vs. yield (50 ksi)
+    // 0 → green, 0.5·Fy → yellow, Fy → red, >Fy → bright orange-red
+    function stressToColor(stress_ksi) {
+        const FY = 50.0;
+        const ratio = Math.max(0, stress_ksi) / FY;
+        if (ratio <= 0.5) {
+            const t = ratio / 0.5;
+            return new THREE.Color(t, 1.0, 0);          // green → yellow
+        }
+        if (ratio <= 1.0) {
+            const t = (ratio - 0.5) / 0.5;
+            return new THREE.Color(1.0, 1.0 - t, 0);   // yellow → red
+        }
+        return new THREE.Color(1.0, 0.15, 0);           // above yield — bright red
+    }
+
     // -----------------------------------------------------------------------
     // Plane fitting helpers
     // -----------------------------------------------------------------------
@@ -194,13 +210,55 @@
         colAttr.needsUpdate = true;
     }
 
-    function makePlaneMesh(w, h, color, opacity) {
-        const geo = new THREE.PlaneGeometry(w, h);
+    function makePlaneMesh(w, h, opacity) {
+        const segW = Math.max(1, Math.round(w / 8));
+        const segH = Math.max(1, Math.round(h / 8));
+        const geo = new THREE.PlaneGeometry(w, h, segW, segH);
+        const cnt = geo.attributes.position.count;
+        geo.setAttribute("color", new THREE.BufferAttribute(new Float32Array(cnt * 3).fill(0.5), 3));
         const mat = new THREE.MeshBasicMaterial({
-            color, transparent: true, opacity,
+            vertexColors: true, transparent: true, opacity,
             side: THREE.DoubleSide, depthWrite: false,
         });
         return new THREE.Mesh(geo, mat);
+    }
+
+    // Color plane vertices blue→white→red by approximate world-Z (shows tilt direction).
+    // Uses small-tilt approximation: local lx ≈ worldX - px, local ly ≈ worldY - py.
+    function colorFitPlane(mesh, fit, px, py) {
+        const posAttr = mesh.geometry.attributes.position;
+        const colAttr = mesh.geometry.attributes.color;
+        if (!colAttr) return;
+        const { a, b, c } = fit;
+        const zCenter = a * px + b * py + c;
+        const zVals = [];
+        for (let i = 0; i < posAttr.count; i++) {
+            zVals.push(zCenter + a * posAttr.getX(i) + b * posAttr.getY(i));
+        }
+        const zMin = Math.min(...zVals);
+        const zMax = Math.max(...zVals);
+        const zRange = zMax - zMin || 1e-6;
+        for (let i = 0; i < posAttr.count; i++) {
+            const t = (zVals[i] - zMin) / zRange;
+            let r, g, bl;
+            if (t < 0.5) {
+                const s = t * 2;         // 0→1
+                r = s; g = s; bl = 1.0;  // blue → white
+            } else {
+                const s = (t - 0.5) * 2; // 0→1
+                r = 1.0; g = 1.0 - s; bl = 1.0 - s; // white → red
+            }
+            colAttr.setXYZ(i, r, g, bl);
+        }
+        colAttr.needsUpdate = true;
+    }
+
+    // Color mean-plane vertices a uniform light gray (flat plane — gradient meaningless).
+    function colorMeanPlane(mesh) {
+        const colAttr = mesh.geometry.attributes.color;
+        if (!colAttr) return;
+        for (let i = 0; i < colAttr.count; i++) colAttr.setXYZ(i, 0.8, 0.8, 0.8);
+        colAttr.needsUpdate = true;
     }
 
     function makeInterPodMesh() {
@@ -407,9 +465,24 @@
                 const rText  = r  != null ? r.toFixed(3)  + " in/yr" : "—";
                 const shText = sh != null ? sh.toFixed(2) + " in"    : "—";
                 const feText = fe != null ? fe.toFixed(3) + " ft"    : "—";
-                tip.innerHTML = `<b>${col.id}</b> &nbsp;Pod ${col.pod}<br>` +
+                let colHtml = `<b>${col.id}</b> &nbsp;Pod ${col.pod}<br>` +
                     `Settlement: ${sText}<br>Rate: ${rText}<br>` +
                     `Floor elev: ${feText}<br>Shim pack: ${shText}`;
+
+                const trips = col.curvature_triplets && col.curvature_triplets[APP.selectedDate];
+                if (trips && trips.length > 0) {
+                    colHtml += `<br><span style="color:#aaa;font-size:0.85em">── Curvature ──</span>`;
+                    trips.forEach(t => {
+                        const ratio = t.ksi / 50.0;
+                        const pct = (ratio * 100).toFixed(0);
+                        const sc = ratio >= 1.0 ? '#ff4400' : ratio >= 0.8 ? '#ffaa00' : ratio >= 0.5 ? '#ffdd00' : '#44cc44';
+                        colHtml += `<br><span style="font-size:0.85em">${t.prev} · ${col.id} · ${t.next}`
+                            + `&nbsp;&nbsp;κ = ${t.k6.toFixed(2)}×10⁻⁶/in`
+                            + `&nbsp;&nbsp;<span style="color:${sc}">σ = ${t.ksi.toFixed(1)} ksi (${pct}%)</span></span>`;
+                    });
+                }
+
+                tip.innerHTML = colHtml;
                 tip.style.left = (event.clientX - rect.left + 14) + "px";
                 tip.style.top  = (event.clientY - rect.top  - 10) + "px";
                 tip.style.display = "block";
@@ -436,6 +509,18 @@
                 const diffVal   = isGrade ? gbd : fd;
                 if (diffVal != null) html += `<br>${diffLabel}: ${diffVal.toFixed(2)} in`;
                 if (!isGrade && gbd != null) html += `<br>Grade beam diff: ${gbd.toFixed(2)} in`;
+                if (isGrade) {
+                    const sd = (beam.grade_beam_stress || {})[APP.selectedDate];
+                    if (sd) {
+                        const peakS = Math.max(sd.s ?? 0, sd.e ?? 0);
+                        if (peakS > 0) {
+                            const ratio = peakS / 50.0;
+                            const pct = (ratio * 100).toFixed(0);
+                            const sc = ratio >= 1.0 ? '#ff4400' : ratio >= 0.8 ? '#ffaa00' : ratio >= 0.5 ? '#ffdd00' : '#44cc44';
+                            html += `<br>Max stress: ${peakS.toFixed(1)} ksi <span style="color:${sc}">(${pct}%)</span>`;
+                        }
+                    }
+                }
                 tip.innerHTML = html;
                 tip.style.left = (event.clientX - rect.left + 14) + "px";
                 tip.style.top  = (event.clientY - rect.top  - 10) + "px";
@@ -468,6 +553,20 @@
         const allDates = data.survey_dates.concat(data.proj_dates);
         const selectedDate = allDates[dateIdx];
         const isProj = data.proj_dates.includes(selectedDate);
+
+        // ---- Date label overlay at top of canvas ----
+        const dateLabel = document.getElementById("three-date-label");
+        if (dateLabel) {
+            if (isProj) {
+                dateLabel.innerHTML = selectedDate
+                    + '&nbsp;&nbsp;<span style="color:#ffcc00;font-size:1.05em;letter-spacing:0.1em">▲ PROJECTED</span>';
+                dateLabel.style.color = "#ffdd88";
+            } else {
+                dateLabel.textContent = selectedDate;
+                dateLabel.style.color = "rgba(255,255,255,0.9)";
+            }
+        }
+
         const cMin = colorMin ?? 0;
         const cMax = colorMax ?? (metric === "rate"
             ? (data.stats.max_rate_in_yr || 1)
@@ -650,7 +749,11 @@
 
             if (!beam.is_inter_pod) {
                 let c0, c1;
-                if (beamColorMode === "elevation") {
+                if (beamColorMode === "stress") {
+                    // stress calculation applies to grade beams only — show floor beams neutral
+                    c0 = c1 = new THREE.Color(0x607080);
+                    mesh.material.emissive.setHex(0x000000);
+                } else if (beamColorMode === "elevation") {
                     const fe0 = sCol.floor_elevations && sCol.floor_elevations[selectedDate];
                     const fe1 = eCol.floor_elevations && eCol.floor_elevations[selectedDate];
                     c0 = fe0 != null ? valueToColor(fe0, floorElevMin, floorElevMax) : new THREE.Color(0x607080);
@@ -711,7 +814,12 @@
 
             if (!beam.is_inter_pod) {
                 let gc0, gc1;
-                if (beamColorMode === "elevation") {
+                if (beamColorMode === "stress") {
+                    const sd = (beam.grade_beam_stress || {})[selectedDate];
+                    const peakS = sd ? Math.max(sd.s ?? 0, sd.e ?? 0) : 0;
+                    gc0 = gc1 = peakS > 0 ? stressToColor(peakS) : new THREE.Color(0x607080);
+                    mesh.material.emissive.setHex(peakS >= 50.0 ? 0x331100 : 0x000000);
+                } else if (beamColorMode === "elevation") {
                     gc0 = gbGS != null ? valueToColor(gbGS, gbElevMin, gbElevMax) : new THREE.Color(0x607080);
                     gc1 = gbGE != null ? valueToColor(gbGE, gbElevMin, gbElevMax) : new THREE.Color(0x607080);
                     mesh.material.emissive.setHex(0x000000);
@@ -747,41 +855,42 @@
             });
 
         // Mean plane — flat horizontal at the mean column-top Z
-        if (!APP.planes.mean) { APP.planes.mean = makePlaneMesh(440, 160, 0xffffff, 0.10); APP.scene.add(APP.planes.mean); }
+        if (!APP.planes.mean) { APP.planes.mean = makePlaneMesh(440, 160, 0.22); APP.scene.add(APP.planes.mean); }
         APP.planes.mean.visible = activePlanes.includes("mean") && colTops.length > 0;
         if (APP.planes.mean.visible) {
             const mz = colTops.reduce((a, p) => a + p.z, 0) / colTops.length;
             APP.planes.mean.position.set(200, 65, mz);
             APP.planes.mean.quaternion.identity();
+            colorMeanPlane(APP.planes.mean);
         }
 
         // Best-fit plane — all visible columns
-        if (!APP.planes.all) { APP.planes.all = makePlaneMesh(440, 160, 0x4fc3f7, 0.12); APP.scene.add(APP.planes.all); }
+        if (!APP.planes.all) { APP.planes.all = makePlaneMesh(440, 160, 0.30); APP.scene.add(APP.planes.all); }
         if (activePlanes.includes("all") && colTops.length >= 3) {
             const fit = fitPlaneLSQ(colTops);
-            if (fit) applyFitPlane(APP.planes.all, fit, 200, 65);
+            if (fit) { applyFitPlane(APP.planes.all, fit, 200, 65); colorFitPlane(APP.planes.all, fit, 200, 65); }
             else APP.planes.all.visible = false;
         } else { APP.planes.all.visible = false; }
 
         // Best-fit plane — Pod A
-        if (!APP.planes.podA) { APP.planes.podA = makePlaneMesh(240, 160, 0xffb74d, 0.14); APP.scene.add(APP.planes.podA); }
+        if (!APP.planes.podA) { APP.planes.podA = makePlaneMesh(240, 160, 0.35); APP.scene.add(APP.planes.podA); }
         const podAPts = colTops.filter(p => p.pod === 'A');
         if (activePlanes.includes("podA") && podAPts.length >= 3) {
             const fit = fitPlaneLSQ(podAPts);
             const cx = podAPts.reduce((s, p) => s + p.x, 0) / podAPts.length;
             const cy = podAPts.reduce((s, p) => s + p.y, 0) / podAPts.length;
-            if (fit) applyFitPlane(APP.planes.podA, fit, cx, cy);
+            if (fit) { applyFitPlane(APP.planes.podA, fit, cx, cy); colorFitPlane(APP.planes.podA, fit, cx, cy); }
             else APP.planes.podA.visible = false;
         } else { APP.planes.podA.visible = false; }
 
         // Best-fit plane — Pod B
-        if (!APP.planes.podB) { APP.planes.podB = makePlaneMesh(240, 160, 0xf06292, 0.14); APP.scene.add(APP.planes.podB); }
+        if (!APP.planes.podB) { APP.planes.podB = makePlaneMesh(240, 160, 0.35); APP.scene.add(APP.planes.podB); }
         const podBPts = colTops.filter(p => p.pod === 'B');
         if (activePlanes.includes("podB") && podBPts.length >= 3) {
             const fit = fitPlaneLSQ(podBPts);
             const cx = podBPts.reduce((s, p) => s + p.x, 0) / podBPts.length;
             const cy = podBPts.reduce((s, p) => s + p.y, 0) / podBPts.length;
-            if (fit) applyFitPlane(APP.planes.podB, fit, cx, cy);
+            if (fit) { applyFitPlane(APP.planes.podB, fit, cx, cy); colorFitPlane(APP.planes.podB, fit, cx, cy); }
             else APP.planes.podB.visible = false;
         } else { APP.planes.podB.visible = false; }
 

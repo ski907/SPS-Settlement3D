@@ -12,6 +12,7 @@ from dash import ClientsideFunction, Input, Output, State, dcc, html
 from dash.exceptions import PreventUpdate
 
 from data_processing import load_beam_info, process_all, read_excel_sheet
+from report import build_report
 
 # ---------------------------------------------------------------------------
 # App init
@@ -158,6 +159,7 @@ CONTROLS_CARD = dbc.Card([
                     options=[
                         {"label": "Differential", "value": "differential"},
                         {"label": "Elevation",    "value": "elevation"},
+                        {"label": "Stress",       "value": "stress"},
                         {"label": "Gray",         "value": "gray"},
                     ],
                     value="differential",
@@ -283,6 +285,23 @@ app.layout = dbc.Container(fluid=True, children=[
                                "background": "#0d1117"},
                         children=[
                             html.Div(
+                                id="three-date-label",
+                                style={
+                                    "position": "absolute",
+                                    "top": "8px",
+                                    "left": "0",
+                                    "right": "0",
+                                    "textAlign": "center",
+                                    "color": "rgba(255,255,255,0.9)",
+                                    "fontSize": "14px",
+                                    "fontWeight": "bold",
+                                    "pointerEvents": "none",
+                                    "zIndex": "50",
+                                    "textShadow": "0 1px 4px rgba(0,0,0,0.9)",
+                                    "letterSpacing": "0.04em",
+                                },
+                            ),
+                            html.Div(
                                 id="three-tooltip",
                                 style={
                                     "position": "absolute",
@@ -325,9 +344,52 @@ app.layout = dbc.Container(fluid=True, children=[
         ], width=6),
     ], className="mb-2"),
 
+    # ---- normalized settlement analysis ----
+    dbc.Row([
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader("Column Analysis — Normalized Settlement & Rate Comparison",
+                               className="py-1 small"),
+                dbc.CardBody([
+                    html.Div(id="analysis-table",
+                             style={"maxHeight": "360px", "overflowY": "auto",
+                                    "fontSize": "12px"}),
+                ], className="p-2"),
+            ], style={"background": "#1e2130", "border": "1px solid #2d3250"}),
+        ], width=7),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader("Settlement Rate — Multi-Window Comparison",
+                               className="py-1 small"),
+                dbc.CardBody([
+                    dcc.Graph(id="rate-compare-chart", style={"height": "340px"},
+                              config={"displayModeBar": False}),
+                ], className="p-1"),
+            ], style={"background": "#1e2130", "border": "1px solid #2d3250"}),
+        ], width=5),
+    ], className="mb-2"),
+
     # ---- hidden div needed for clientside output ----
     html.Div(id="three-canvas-trigger", style={"display": "none"}),
 ], style={"background": "#0d1117", "minHeight": "100vh"})
+
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+def _settlement_color(value, max_val):
+    """Blue→yellow→red hex color for heatmap column markers."""
+    if value is None or max_val == 0:
+        return "#4fc3f7"
+    t = min(1.0, value / max(max_val, 0.001))
+    if t < 0.5:
+        r = int(255 * (t * 2))
+        g = int(255 * (0.76 + t * 0.24))
+        b = int(255 * (1 - t * 2))
+    else:
+        r, g, b = 255, int(255 * (1 - (t - 0.5) * 2)), 0
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 # ---------------------------------------------------------------------------
@@ -574,7 +636,7 @@ def update_sparkline(mp_id, data):
 def export_report(n_clicks, data, date_idx, metric):
     if not data:
         raise PreventUpdate
-    html_str = _build_report(data, date_idx, metric)
+    html_str = build_report(data, date_idx, metric)
     return dict(content=html_str, filename="SPS_Settlement_Report.html", type="text/html")
 
 
@@ -590,6 +652,124 @@ def heatmap_select_mp(click_data):
     if not mp_id:
         raise PreventUpdate
     return mp_id
+
+
+# ---------------------------------------------------------------------------
+# Analysis section callbacks
+# ---------------------------------------------------------------------------
+
+@app.callback(
+    Output("analysis-table", "children"),
+    Input("scene-data", "data"),
+    Input("date-slider", "value"),
+    prevent_initial_call=True,
+)
+def update_analysis_table(data, date_idx):
+    if not data:
+        raise PreventUpdate
+    all_dates     = data["survey_dates"] + data["proj_dates"]
+    selected_date = all_dates[date_idx]
+    stats         = data["stats"]
+    ns_stats      = stats.get("norm_settle_stats", {}).get(selected_date, {})
+    r3_stats      = stats.get("rate_3yr_stats",    {}).get(selected_date, {})
+    ns_mean       = ns_stats.get("mean")
+    ns_std        = ns_stats.get("std")
+    r3_mean       = r3_stats.get("mean")
+    r3_std        = r3_stats.get("std")
+
+    rows = []
+    for col in data["columns"]:
+        ns  = (col.get("normalized_settlement") or {}).get(selected_date)
+        r3  = col["settlement_rates"].get(selected_date)
+        r1  = (col.get("rate_1yr")  or {}).get(selected_date)
+        r10 = (col.get("rate_10yr") or {}).get(selected_date)
+        if ns is None and r3 is None:
+            continue
+        sig_ns = (ns - ns_mean) / ns_std if (ns is not None and ns_std and ns_std > 0) else None
+        sig_r3 = (r3 - r3_mean) / r3_std if (r3 is not None and r3_std and r3_std > 0) else None
+        rows.append(dict(id=col["id"], pod=col["pod"],
+                         ns=ns, r1=r1, r3=r3, r10=r10,
+                         sig_ns=sig_ns, sig_r3=sig_r3))
+
+    rows.sort(key=lambda r: -(r["ns"] or 0))
+
+    def _fmt(v, d=3): return f"{v:.{d}f}" if v is not None else "—"
+    def _sig_span(s):
+        if s is None: return "—"
+        color = "#f87171" if s > 2 else ("#fbbf24" if s > 1 else ("#34d399" if s < -1 else "#94a3b8"))
+        return html.Span(f"{s:+.1f}σ", style={"color": color, "fontWeight": "bold"})
+
+    header = html.Tr([html.Th(h, style={"background": "#1e3a5f", "color": "#93c5fd",
+                                         "padding": "4px 6px"})
+                      for h in ["Column", "Pod", "Norm. (in/yr)", "σ", "3yr Rate", "σ", "1yr Rate", "10yr Rate"]])
+    trows  = []
+    for r in rows:
+        bg = ("#2d1010" if (r["sig_ns"] or 0) > 2
+              else "#241d00" if (r["sig_ns"] or 0) > 1
+              else "")
+        trows.append(html.Tr([
+            html.Td(html.B(r["id"])),
+            html.Td(r["pod"]),
+            html.Td(_fmt(r["ns"])),
+            html.Td(_sig_span(r["sig_ns"])),
+            html.Td(_fmt(r["r3"])),
+            html.Td(_sig_span(r["sig_r3"])),
+            html.Td(_fmt(r["r1"])),
+            html.Td(_fmt(r["r10"])),
+        ], style={"background": bg, "borderBottom": "1px solid #1e293b"}))
+
+    return html.Table(
+        [html.Thead(header), html.Tbody(trows)],
+        style={"width": "100%", "borderCollapse": "collapse", "fontSize": "12px"},
+    )
+
+
+@app.callback(
+    Output("rate-compare-chart", "figure"),
+    Input("scene-data", "data"),
+    Input("date-slider", "value"),
+    prevent_initial_call=True,
+)
+def update_rate_compare_chart(data, date_idx):
+    if not data:
+        raise PreventUpdate
+    all_dates     = data["survey_dates"] + data["proj_dates"]
+    selected_date = all_dates[date_idx]
+    survey_set    = set(data["survey_dates"])
+
+    # Show multi-window rates over time for top 5 columns by current 3yr rate
+    sorted_cols = sorted(
+        data["columns"],
+        key=lambda c: -(c["settlement_rates"].get(selected_date) or 0),
+    )[:5]
+
+    fig = go.Figure()
+    for col in sorted_cols:
+        dates = [d for d in data["survey_dates"] if d in survey_set]
+        r3_vals = [col["settlement_rates"].get(d) for d in dates]
+        r1_vals = [(col.get("rate_1yr") or {}).get(d) for d in dates]
+
+        fig.add_trace(go.Scatter(
+            x=dates, y=r3_vals, mode="lines+markers",
+            name=f"{col['id']} 3yr", line=dict(width=2),
+        ))
+        fig.add_trace(go.Scatter(
+            x=dates, y=r1_vals, mode="lines",
+            name=f"{col['id']} 1yr", line=dict(width=1, dash="dot"),
+            showlegend=True,
+        ))
+
+    fig.update_layout(
+        title=dict(text="1yr vs 3yr Rate — Top 5 Columns", font=dict(size=11, color="white"), x=0.5),
+        xaxis=dict(color="white", gridcolor="#2a2a3e"),
+        yaxis=dict(color="white", gridcolor="#2a2a3e", title="Rate (in/yr)"),
+        plot_bgcolor="#0d1117", paper_bgcolor="#1e2130",
+        font=dict(color="white", size=10),
+        legend=dict(font=dict(size=9, color="white"), bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=50, r=10, t=30, b=30),
+        height=340,
+    )
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -633,134 +813,6 @@ app.clientside_callback(
 )
 
 
-# ---------------------------------------------------------------------------
-# Report generation helpers
-# ---------------------------------------------------------------------------
-
-def _settlement_color(value, max_val):
-    """Map settlement value to a hex color (blue→yellow→red)."""
-    if value is None or max_val == 0:
-        return "#4fc3f7"
-    t = min(1.0, value / max(max_val, 0.001))
-    if t < 0.5:
-        r = int(255 * (t * 2))
-        g = int(255 * (0.76 + t * 0.24))
-        b = int(255 * (1 - t * 2))
-    else:
-        r = 255
-        g = int(255 * (1 - (t - 0.5) * 2))
-        b = 0
-    return f"#{r:02x}{g:02x}{b:02x}"
-
-
-def _build_report(data, date_idx, metric):
-    """Generate a self-contained HTML report with embedded Plotly charts."""
-    import plotly.io as pio
-
-    all_dates = data["survey_dates"] + data["proj_dates"]
-    selected_date = all_dates[date_idx]
-
-    charts_html = []
-
-    # -- Settlement timeline for all columns --
-    fig_ts = go.Figure()
-    pods = {"A": "#4fc3f7", "B": "#f48fb1"}
-    for col in data["columns"]:
-        obs_d = [d for d, v in col["settlements"].items() if v is not None]
-        obs_v = [col["settlements"][d] for d in obs_d]
-        proj_d = [d for d, v in col["proj_settlements"].items() if v is not None]
-        proj_v = [col["proj_settlements"][d] for d in proj_d]
-        if obs_d and proj_d:
-            proj_d = [obs_d[-1]] + proj_d
-            proj_v = [obs_v[-1]] + proj_v
-
-        color = pods.get(col["pod"], "gray")
-        fig_ts.add_trace(go.Scatter(x=obs_d, y=obs_v, mode="lines",
-                                    name=col["id"], line=dict(color=color, width=1.5),
-                                    legendgroup=col["pod"],
-                                    showlegend=True))
-        if proj_d:
-            fig_ts.add_trace(go.Scatter(x=proj_d, y=proj_v, mode="lines",
-                                        line=dict(color=color, width=1, dash="dot"),
-                                        showlegend=False, legendgroup=col["pod"]))
-
-    fig_ts.update_layout(
-        title="Cumulative Settlement Over Time",
-        xaxis_title="Date", yaxis_title="Settlement (in)",
-        plot_bgcolor="#f8f9fa", paper_bgcolor="white",
-        height=400,
-    )
-    charts_html.append(f"<h2>Settlement History</h2>{pio.to_html(fig_ts, full_html=False, include_plotlyjs=False)}")
-
-    # -- Plan heatmap at selected date --
-    hm_callback_data = data
-    hm_fig = _make_heatmap_for_report(data, selected_date)
-    charts_html.append(f"<h2>Settlement Plan View — {selected_date}</h2>{pio.to_html(hm_fig, full_html=False, include_plotlyjs=False)}")
-
-    # -- Summary table --
-    rows = []
-    for col in data["columns"]:
-        last_obs = [v for v in col["settlements"].values() if v is not None]
-        last_rate = [v for v in col["settlement_rates"].values() if v is not None]
-        rows.append({
-            "Point": col["id"],
-            "Pod": col["pod"],
-            "Max Settlement (in)": f"{max(last_obs):.2f}" if last_obs else "—",
-            "Latest Rate (in/yr)": f"{last_rate[-1]:.2f}" if last_rate else "—",
-        })
-    df_table = pd.DataFrame(rows)
-    table_html = df_table.to_html(index=False, border=0,
-                                  classes="table table-striped table-sm")
-
-    timestamp = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
-    report = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>SPS Foundation Settlement Report</title>
-<script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
-<style>body{{background:#fff; font-family:Arial,sans-serif;}} h2{{color:#2c3e50; margin-top:2rem;}}</style>
-</head>
-<body class="container-fluid p-4">
-<h1>Amundsen-Scott South Pole Station — Foundation Settlement</h1>
-<p class="text-muted">Generated {timestamp} | Selected date: {selected_date}</p>
-<hr>
-<h2>Summary by Monitoring Point</h2>
-{table_html}
-{"".join(charts_html)}
-</body>
-</html>"""
-    return report
-
-
-def _make_heatmap_for_report(data, selected_date):
-    fig = go.Figure()
-    if selected_date in data["heatmap_grids"]:
-        gz = np.array(data["heatmap_grids"][selected_date])
-        fig.add_trace(go.Heatmap(
-            x=data["heatmap_x"], y=data["heatmap_y"], z=gz,
-            colorscale="RdBu_r",
-            zmin=data["stats"]["min_settlement_in"],
-            zmax=data["stats"]["max_settlement_in"],
-            colorbar=dict(title="Settlement (in)"),
-        ))
-    for col in data["columns"]:
-        val = col["settlements"].get(selected_date)
-        fig.add_trace(go.Scatter(
-            x=[col["x"]], y=[col["y"]],
-            mode="markers+text",
-            marker=dict(size=10, color="white", symbol="square",
-                        line=dict(width=1, color="black")),
-            text=[col["id"]], textposition="top center", textfont=dict(size=7),
-            showlegend=False,
-        ))
-    fig.update_layout(
-        xaxis=dict(scaleanchor="y", scaleratio=1, showgrid=False, showticklabels=False),
-        yaxis=dict(showgrid=False, showticklabels=False),
-        height=350, margin=dict(l=10, r=10, t=20, b=10),
-    )
-    return fig
 
 
 if __name__ == "__main__":
